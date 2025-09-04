@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pill Label → Med List</title>
+  <link rel="icon" href="data:," />
+  <style>
+    :root { --bg:#0b1220; --panel:#101827; --muted:#93a3b8; --fg:#e6edf3; --accent:#7dd3fc; }
+    html,body{height:100%}
+    body{margin:0;font:16px/1.5 ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;background:linear-gradient(180deg,#0b1220,#0e1730);color:var(--fg)}
+    .container{max-width:1100px;margin:0 auto;padding:24px}
+    h1{font-size:22px;margin:0 0 12px}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .card{background:var(--panel);border:1px solid #1f2937;border-radius:16px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+    .uploader{flex:1 1 420px}
+    .btn{display:inline-flex;align-items:center;gap:8px;border:1px solid #2b3a55;background:#121a2b;color:var(--fg);padding:10px 14px;border-radius:10px;cursor:pointer}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .btn.secondary{background:#0f1524;border-color:#394b72}
+    .muted{color:var(--muted)}
+    .grid{display:grid;gap:12px}
+    .drop{border:2px dashed #2b3a55;border-radius:12px;padding:18px;text-align:center;background:#0f1627}
+    .drop.drag{border-color:var(--accent);background:#0c1b2b}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px;border-bottom:1px solid #1f2937;vertical-align:top}
+    th{text-align:left;font-weight:600}
+    input,textarea,select{width:100%;box-sizing:border-box;background:#0b1220;border:1px solid #2b3a55;color:var(--fg);padding:8px;border-radius:8px}
+    textarea{min-height:44px}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #2b3a55;color:var(--muted);font-size:12px}
+    .preview{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .preview img{max-height:90px;border-radius:8px;border:1px solid #1f2937}
+    details{background:#0f1627;border:1px solid #1f2937;border-radius:12px;padding:12px}
+  </style>
+  <!-- Tesseract.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header class="row" style="align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div>
+        <h1>Pill Label → Med List</h1>
+        <div class="muted">Upload pill bottle label photos; OCR will extract and structure the info.</div>
+      </div>
+      <div class="row">
+        <button id="exportCsv" class="btn" disabled>Export CSV</button>
+        <button id="addRow" class="btn secondary">Add row</button>
+        <label class="btn" for="fileInput">Upload images</label>
+        <input id="fileInput" type="file" accept="image/*" multiple capture="environment" style="display:none" />
+      </div>
+    </header>
+
+    <section class="card uploader">
+      <div id="drop" class="drop">
+        <div><strong>Drag & drop</strong> images here or use the Upload button</div>
+        <div class="muted" style="margin-top:6px">Tips: fill the frame with the label, avoid glare, shoot straight-on.</div>
+        <div id="preview" class="preview"></div>
+      </div>
+      <div id="status" class="muted" style="margin-top:8px"></div>
+    </section>
+
+    <section class="card" style="margin-top:16px">
+      <div style="overflow:auto">
+        <table id="medTable">
+          <thead>
+            <tr>
+              <th>Drug</th>
+              <th>Strength</th>
+              <th>Directions (SIG)</th>
+              <th>Qty</th>
+              <th>Refills</th>
+              <th>Rx#</th>
+              <th>NDC</th>
+              <th>Fill date</th>
+              <th>Prescriber</th>
+              <th>Pharmacy</th>
+              <th>Active?</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="tbody">
+            <tr id="emptyRow"><td colspan="12" class="muted">No medications yet. Upload a photo or click “Add row”.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <details style="margin-top:16px">
+      <summary><strong>How it works & roadmap</strong></summary>
+      <ul>
+        <li>OCR runs locally in the browser via Tesseract.js; images are not sent anywhere by this page.</li>
+        <li>Simple heuristics parse common fields: NDC, Rx#, QTY, REFILLS, dates, SIG, drug+strength.</li>
+        <li>Everything is editable; export to CSV for your records or import elsewhere.</li>
+      </ul>
+      <div class="muted">Future: RxNorm mapping, NDC validation, better de-skew & glare detection, FHIR export.</div>
+    </details>
+  </div>
+
+<script>
+  const T = window.Tesseract;
+  const $ = (id) => document.getElementById(id);
+  const state = { rows: [] };
+
+  function uid(){ return Math.random().toString(36).slice(2); }
+
+  function renderRows(){
+    const tb = $("tbody");
+    tb.innerHTML = "";
+    if(!state.rows.length){
+      const tr = document.createElement("tr");
+      tr.innerHTML = '<td id="emptyRow" colspan="12" class="muted">No medications yet. Upload a photo or click “Add row”.</td>';
+      tb.appendChild(tr);
+      $("exportCsv").disabled = true;
+      return;
+    }
+    $("exportCsv").disabled = false;
+    for(const r of state.rows){
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><input value="${r.drugName??''}" data-k="drugName" data-id="${r.id}"></td>
+        <td><input value="${r.strength??''}" data-k="strength" data-id="${r.id}"></td>
+        <td><textarea data-k="directions" data-id="${r.id}">${r.directions??''}</textarea></td>
+        <td><input value="${r.quantity??''}" data-k="quantity" data-id="${r.id}"></td>
+        <td><input value="${r.refills??''}" data-k="refills" data-id="${r.id}"></td>
+        <td><input value="${r.rxNumber??''}" data-k="rxNumber" data-id="${r.id}"></td>
+        <td><input value="${r.ndc??''}" data-k="ndc" data-id="${r.id}"></td>
+        <td><input value="${r.fillDate??''}" data-k="fillDate" data-id="${r.id}"></td>
+        <td><input value="${r.prescriber??''}" data-k="prescriber" data-id="${r.id}"></td>
+        <td><input value="${r.pharmacy??''}" data-k="pharmacy" data-id="${r.id}"></td>
+        <td>
+          <select data-k="active" data-id="${r.id}">
+            <option value="yes" ${r.active!==false?'selected':''}>Yes</option>
+            <option value="no" ${r.active===false?'selected':''}>No</option>
+          </select>
+        </td>
+        <td><button class="btn secondary" data-del="${r.id}">Delete</button></td>`;
+      tb.appendChild(tr);
+    }
+  }
+
+  function patchRow(id, k, v){
+    const row = state.rows.find(r=>r.id===id);
+    if(!row) return;
+    if(k==='active') row[k] = (v==='yes'); else row[k]=v;
+  }
+
+  document.addEventListener('input', (e)=>{
+    const t = e.target;
+    if(t && t.dataset && t.dataset.id){
+      patchRow(t.dataset.id, t.dataset.k, t.value);
+    }
+  });
+  document.addEventListener('click', (e)=>{
+    const t = e.target;
+    if(t && t.dataset && t.dataset.del){
+      const id = t.dataset.del;
+      state.rows = state.rows.filter(r=>r.id!==id);
+      renderRows();
+    }
+  });
+
+  function addBlank(){ state.rows.push({ id: uid(), active: true }); renderRows(); }
+  $("addRow").onclick = addBlank;
+
+  // CSV export
+  function exportCSV(){
+    const headers = ["drugName","strength","directions","quantity","refills","rxNumber","ndc","fillDate","prescriber","pharmacy","active"];
+    const lines = [headers.join(",")];
+    for(const r of state.rows){
+      const vals = headers.map(h=>{
+        let v = r[h];
+        if(h==='active') v = r.active!==false; // default true
+        const s = String(v??"").replaceAll('"','""');
+        return `"${s}"`;
+      });
+      lines.push(vals.join(","));
+    }
+    const blob = new Blob([lines.join("\n")], {type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `med-list-${new Date().toISOString().slice(0,10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+  $("exportCsv").onclick = exportCSV;
+
+  // Drag/drop & file input
+  const drop = $("drop");
+  const fileInput = $("fileInput");
+  fileInput.addEventListener('change', e=> handleFiles(e.target.files));
+  ;['dragenter','dragover'].forEach(ev=> drop.addEventListener(ev, e=>{ e.preventDefault(); drop.classList.add('drag'); }));
+  ;['dragleave','drop'].forEach(ev=> drop.addEventListener(ev, e=>{ e.preventDefault(); drop.classList.remove('drag'); }));
+  drop.addEventListener('drop', e=> handleFiles(e.dataTransfer.files));
+
+  function setStatus(msg){ $("status").textContent = msg||''; }
+
+  async function handleFiles(files){
+    if(!files || !files.length) return;
+    setStatus('Reading label…');
+    const preview = $("preview");
+    for(const f of files){
+      const url = URL.createObjectURL(f);
+      const img = new Image(); img.src = url; img.alt = f.name; img.onload = ()=> URL.revokeObjectURL(url);
+      preview.appendChild(img);
+      try{
+        const { data } = await T.recognize(f, 'eng');
+        const parsed = parseLabel(data.text||'');
+        state.rows.push({ id: uid(), active:true, ...parsed });
+        renderRows();
+      }catch(err){ console.error(err); setStatus('OCR failed on one image. You can add a row manually.'); }
+    }
+    setStatus('');
+  }
+
+  // Heuristic parser
+  function parseLabel(raw){
+    const lines = (raw||'').replace(/\r/g,'\n').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+    const joined = lines.join(' \n ');
+    const find = (re)=>{ const m = joined.match(re); return m ? (m[1]||m[0]) : undefined; };
+
+    const ndc = find(/NDC[^\d]*([0-9]{4,5}-?[0-9]{3,4}-?[0-9]{1,2}|[0-9]{10,11})/i);
+    const rxNumber = find(/(?:RX#|RX\s?:|PRESCRIPTION\s?#)\s*([A-Z0-9-]+)/i);
+    const quantity = find(/(?:QTY|QUANTITY)\s*[:#]?\s*([0-9,.]+)/i);
+    const refills = find(/(?:REFILLS?|RF)\s*[:#]?\s*([0-9]+|PRN)/i);
+    const fillDate = find(/(?:FILLED|FILL DATE|DISPENSED)\s*[:#]?\s*([0-9]{1,2}[\/-][0-9]{1,2}[\/-][0-9]{2,4})/i);
+
+    let directions = find(/(?:SIG|DIRECTIONS?|TAKE|USE)[:\s-]*([^\n]+?)(?= \n |$)/i);
+    if(!directions){
+      const guess = lines.find(l=>/\b(TAKE|USE|APPLY|INSTILL|INHALE|INJECT|PLACE)\b/i.test(l));
+      if(guess) directions = guess;
+    }
+
+    const drugLine = lines.find(l=>/\b(mg|mcg|g|ml|%|units?)\b/i.test(l) && /[A-Za-z]{3,}/.test(l)) ||
+                      lines.find(l=>/\bTAB(LET)?S?\b|CAPS?\b|SOLUTION|SUSP(ENSION)?|CREAM|OINTMENT/i.test(l));
+    let drugName, strength;
+    if(drugLine){
+      const sm = drugLine.match(/([0-9]+(?:\.[0-9]+)?\s*(?:mg|mcg|g|ml|%|units?))/i);
+      strength = sm && sm[1];
+      drugName = drugLine.replace(/([0-9]+(?:\.[0-9]+)?\s*(?:mg|mcg|g|ml|%|units?))/gi,'')
+                         .replace(/\b(TAB(LET)?S?|CAPS?(ULES)?|ER|XR|DR|CR|SOL(UTION)?|SUSP(ENSION)?|CREAM|OINTMENT|LOTION|INHALER|NASAL|OPHTH)\b/gi,'')
+                         .replace(/\s{2,}/g,' ').trim();
+    }
+
+    const prescriber = find(/(?:DR\.?|DO\b|MD\b)\s*([A-Z][A-Za-z' -]+\b)/);
+    const pharmacy = find(/(?:PHARMACY|APOTHECARY|RITE AID|WALGREENS|CVS|COSTCO|WALMART)[^\n]*/i);
+
+    return { drugName, strength, directions, quantity, refills, rxNumber, ndc, fillDate, prescriber, pharmacy };
+  }
+
+  // Add one blank row to start if desired
+  // addBlank();
+</script>
+</body>
+</html>
